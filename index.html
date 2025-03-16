@@ -563,7 +563,7 @@
                     // Leave stronger trail when returning with resource
                     const idx = Math.floor(p.y) * width + Math.floor(p.x);
                     if (idx >= 0 && idx < trailMap.length) {
-                        trailMap[idx] += 0.2; // Much stronger trail
+                        trailMap[idx] += 0.1; // Much stronger trail
                         
                         // Cap the trail intensity
                         if (trailMap[idx] > 1) trailMap[idx] = 1;
