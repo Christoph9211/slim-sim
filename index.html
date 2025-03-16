@@ -944,25 +944,6 @@
                 // Resize canvas
                 initCanvas();
                 
-                // Create new trail map at new size
-                initTrailMap();
-                
-                // Position resources proportionally to new size
-                resources = resources.map(resource => {
-                    return {
-                        x: (resource.x / canvas.width) * width,
-                        y: (resource.y / canvas.height) * height
-                    };
-                });
-                
-                // Position walls proportionally to new size
-                walls = walls.map(wall => {
-                    return {
-                        x: (wall.x / canvas.width) * width,
-                        y: (wall.y / canvas.height) * height
-                    };
-                });
-                
                 // Redraw
                 draw();
                 
