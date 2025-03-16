@@ -381,7 +381,37 @@
             }
             return false;
         }
-        
+
+        function addParticleSystem() {
+          scene.particles = new Array(1000).fill().map(() => ({
+          x: Math.random() * simWidth,
+          y: Math.random() * simHeight,
+          age: 0,
+          maxAge: 100 + Math.random() * 100
+        }));
+        }
+
+        function updateParticles() {
+          for (const particle of scene.particles) {
+            // Sample velocity at particle position
+            const velocityX = scene.fluid.sampleField(particle.x, particle.y, U_FIELD);
+            const velocityY = scene.fluid.sampleField(particle.x, particle.y, V_FIELD);
+            
+            // Update position
+            particle.x += velocityX * scene.dt;
+            particle.y += velocityY * scene.dt;
+            particle.age++;
+            
+            // Reset if too old or out of bounds
+            if (particle.age > particle.maxAge || 
+                particle.x < 0 || particle.x > simWidth || 
+                particle.y < 0 || particle.y > simHeight) {
+              particle.x = Math.random() * simWidth;
+              particle.y = Math.random() * simHeight;
+              particle.age = 0;
+            }
+          }
+        }
         // Move and update particles
         function moveParticles() {
             for (let i = 0; i < particles.length; i++) {
