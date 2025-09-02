@@ -165,8 +165,11 @@
         // Simulation parameters
         let width, height;
         let trailMap;
+        let trailMapNext;
         let resources = [];
         let walls = [];
+        // Spatial hash for walls to speed up collision checks
+        let wallGrid = new Map(); // key: "cx,cy" -> Array<{x,y}>
         let particles = [];
         let isRunning = false;
         let isAddingResources = false;
@@ -177,6 +180,9 @@
         let lastWallX = null;
         let lastWallY = null;
         let animationId = null;
+        // Reusable image buffer for drawing trails
+        let imageData = null;
+        let imagePixels = null; // Uint8ClampedArray view
         
         // Settings controlled by sliders
         let settings = {
@@ -228,6 +234,11 @@
         // Initialize the trail map array
         function initTrailMap() {
             trailMap = new Float32Array(width * height);
+            // Prepare a secondary buffer for diffusion (ping-pong)
+            trailMapNext = new Float32Array(width * height);
+            // Reuse a single ImageData buffer for drawing
+            imageData = ctx.createImageData(width, height);
+            imagePixels = imageData.data;
         }
         
         // Create particles at the source
@@ -253,33 +264,25 @@
             // Clear canvas
             ctx.clearRect(0, 0, width, height);
             
-            // Create image data to visualize the trail map
-            const imageData = ctx.createImageData(width, height);
             const isDarkMode = document.documentElement.classList.contains('dark');
             
-            // Draw the trails
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    const i = y * width + x;
-                    const t = Math.min(1, trailMap[i]);
-                    
-                    // RGBA
-                    const idx = i * 4;
-                    
-                    if (isDarkMode) {
-                        // Dark mode trail coloring
-                        imageData.data[idx] = 135 * t; // R
-                        imageData.data[idx + 1] = 134 * t; // G
-                        imageData.data[idx + 2] = 255 * t; // B
-                    } else {
-                        // Light mode trail coloring
-                        imageData.data[idx] = 93 * t; // R
-                        imageData.data[idx + 1] = 92 * t; // G
-                        imageData.data[idx + 2] = 222 * t; // B
-                    }
-                    
-                    imageData.data[idx + 3] = t * 255; // Alpha
+            // Write the trail map to the reusable image buffer
+            const n = trailMap.length;
+            for (let i = 0, p = 0; i < n; i++, p += 4) {
+                const t = trailMap[i] < 1 ? trailMap[i] : 1;
+                const a = (t * 255) | 0;
+                if (isDarkMode) {
+                    // Dark mode trail coloring
+                    imagePixels[p]     = (135 * t) | 0; // R
+                    imagePixels[p + 1] = (134 * t) | 0; // G
+                    imagePixels[p + 2] = (255 * t) | 0; // B
+                } else {
+                    // Light mode trail coloring
+                    imagePixels[p]     = (93 * t) | 0;  // R
+                    imagePixels[p + 1] = (92 * t) | 0;  // G
+                    imagePixels[p + 2] = (222 * t) | 0; // B
                 }
+                imagePixels[p + 3] = a; // Alpha
             }
             
             ctx.putImageData(imageData, 0, 0);
@@ -350,32 +353,41 @@
         
         // Diffuse the trail map
         function diffuseTrails() {
-            const diffusionKernel = [
-                0.05, 0.1, 0.05,
-                0.1, 0.4, 0.1,
-                0.05, 0.1, 0.05
-            ];
-            
-            const newTrailMap = new Float32Array(width * height);
-            
-            for (let y = 1; y < height - 1; y++) {
-                for (let x = 1; x < width - 1; x++) {
-                    let sum = 0;
-                    let kernelIndex = 0;
-                    
-                    for (let ky = -1; ky <= 1; ky++) {
-                        for (let kx = -1; kx <= 1; kx++) {
-                            const idx = (y + ky) * width + (x + kx);
-                            sum += trailMap[idx] * diffusionKernel[kernelIndex++];
-                        }
-                    }
-                    
-                    newTrailMap[y * width + x] = sum * settings.diffusionRate + 
-                                               trailMap[y * width + x] * (1 - settings.diffusionRate);
+            // Optimized 3x3 convolution using direct neighbor offsets and ping-pong buffers
+            const w = width;
+            const h = height;
+            const src = trailMap;
+            const dst = trailMapNext;
+            const dr = settings.diffusionRate;
+            const ir = 1 - dr;
+            // We only compute for interior pixels to avoid bounds checks
+            for (let y = 1; y < h - 1; y++) {
+                let base = y * w + 1; // start at x = 1
+                for (let x = 1; x < w - 1; x++, base++) {
+                    const i = base;
+                    const sum = (
+                        src[i - w - 1] * 0.05 + src[i - w] * 0.1 + src[i - w + 1] * 0.05 +
+                        src[i - 1] * 0.1 + src[i] * 0.4 + src[i + 1] * 0.1 +
+                        src[i + w - 1] * 0.05 + src[i + w] * 0.1 + src[i + w + 1] * 0.05
+                    );
+                    dst[i] = sum * dr + src[i] * ir;
                 }
             }
-            
-            trailMap = newTrailMap;
+            // Copy borders without diffusion to keep it simple
+            // Top and bottom rows
+            for (let x = 0; x < w; x++) {
+                dst[x] = src[x];
+                dst[(h - 1) * w + x] = src[(h - 1) * w + x];
+            }
+            // Left and right columns
+            for (let y = 0; y < h; y++) {
+                dst[y * w] = src[y * w];
+                dst[y * w + (w - 1)] = src[y * w + (w - 1)];
+            }
+            // Swap buffers
+            const tmp = trailMap;
+            trailMap = trailMapNext;
+            trailMapNext = tmp;
         }
         
         // Decay the trails
@@ -387,12 +399,71 @@
         
         // Check if a point collides with a wall
         function checkWallCollision(x, y) {
-            for (const wall of walls) {
-                if (Math.abs(x - wall.x) < wallSize/2 && Math.abs(y - wall.y) < wallSize/2) {
-                    return true;
+            if (!walls.length) return false;
+            const cx = Math.floor(x / wallSize);
+            const cy = Math.floor(y / wallSize);
+            for (let gy = cy - 1; gy <= cy + 1; gy++) {
+                for (let gx = cx - 1; gx <= cx + 1; gx++) {
+                    const key = gx + ',' + gy;
+                    const bucket = wallGrid.get(key);
+                    if (!bucket) continue;
+                    for (let i = 0; i < bucket.length; i++) {
+                        const wall = bucket[i];
+                        if (Math.abs(x - wall.x) < wallSize / 2 && Math.abs(y - wall.y) < wallSize / 2) {
+                            return true;
+                        }
+                    }
                 }
             }
             return false;
+        }
+
+        // Helpers for wall spatial hashing
+        function wallCellKey(x, y) {
+            return Math.floor(x / wallSize) + ',' + Math.floor(y / wallSize);
+        }
+
+        function addWall(x, y) {
+            const wall = { x, y };
+            walls.push(wall);
+            const key = wallCellKey(x, y);
+            const bucket = wallGrid.get(key);
+            if (bucket) bucket.push(wall); else wallGrid.set(key, [wall]);
+        }
+
+        function removeWallAt(x, y) {
+            // Find wall using spatial grid first
+            const cx = Math.floor(x / wallSize);
+            const cy = Math.floor(y / wallSize);
+            for (let gy = cy - 1; gy <= cy + 1; gy++) {
+                for (let gx = cx - 1; gx <= cx + 1; gx++) {
+                    const key = gx + ',' + gy;
+                    const bucket = wallGrid.get(key);
+                    if (!bucket) continue;
+                    for (let i = 0; i < bucket.length; i++) {
+                        const wall = bucket[i];
+                        if (Math.abs(x - wall.x) <= wallSize / 2 && Math.abs(y - wall.y) <= wallSize / 2) {
+                            // Remove from grid bucket
+                            bucket.splice(i, 1);
+                            if (bucket.length === 0) wallGrid.delete(key);
+                            // Remove from walls array
+                            const idx = walls.indexOf(wall);
+                            if (idx !== -1) walls.splice(idx, 1);
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        function rebuildWallGrid() {
+            wallGrid.clear();
+            for (const w of walls) {
+                const key = wallCellKey(w.x, w.y);
+                const bucket = wallGrid.get(key);
+                if (bucket) bucket.push(w); else wallGrid.set(key, [w]);
+            }
         }
         
         // Move and update particles
@@ -704,12 +775,7 @@
         
         // Check if a point is inside a wall
         function isPointInWall(x, y) {
-            for (const wall of walls) {
-                if (Math.abs(x - wall.x) <= wallSize/2 && Math.abs(y - wall.y) <= wallSize/2) {
-                    return true;
-                }
-            }
-            return false;
+            return checkWallCollision(x, y);
         }
         
         // Check if a point is near the source or resources (to prevent placing walls on them)
@@ -735,10 +801,19 @@
         
         // Find an existing wall at the given coordinates
         function findWallAt(x, y) {
-            for (let i = 0; i < walls.length; i++) {
-                const wall = walls[i];
-                if (Math.abs(x - wall.x) <= wallSize/2 && Math.abs(y - wall.y) <= wallSize/2) {
-                    return i;
+            const cx = Math.floor(x / wallSize);
+            const cy = Math.floor(y / wallSize);
+            for (let gy = cy - 1; gy <= cy + 1; gy++) {
+                for (let gx = cx - 1; gx <= cx + 1; gx++) {
+                    const key = gx + ',' + gy;
+                    const bucket = wallGrid.get(key);
+                    if (!bucket) continue;
+                    for (let i = 0; i < bucket.length; i++) {
+                        const wall = bucket[i];
+                        if (Math.abs(x - wall.x) <= wallSize/2 && Math.abs(y - wall.y) <= wallSize/2) {
+                            return walls.indexOf(wall);
+                        }
+                    }
                 }
             }
             return -1;
@@ -763,14 +838,12 @@
             if (isAddingWalls) {
                 // Only add if not already a wall here
                 if (!isPointInWall(x, y)) {
-                    walls.push({ x, y });
+                    addWall(x, y);
                     draw();
                 }
             } else if (isErasing) {
                 // Find and remove wall
-                const wallIndex = findWallAt(x, y);
-                if (wallIndex !== -1) {
-                    walls.splice(wallIndex, 1);
+                if (removeWallAt(x, y)) {
                     draw();
                 }
             }
@@ -802,14 +875,12 @@
             if (isAddingWalls) {
                 // Only add if not already a wall here
                 if (!isPointInWall(x, y)) {
-                    walls.push({ x, y });
+                    addWall(x, y);
                     draw();
                 }
             } else if (isErasing) {
                 // Find and remove wall
-                const wallIndex = findWallAt(x, y);
-                if (wallIndex !== -1) {
-                    walls.splice(wallIndex, 1);
+                if (removeWallAt(x, y)) {
                     draw();
                 }
             }
@@ -862,6 +933,7 @@
                 // Reset simulation
                 resources = [];
                 walls = [];
+                wallGrid.clear();
                 initTrailMap();
                 settings.sourceX = Math.floor(width / 2);
                 settings.sourceY = Math.floor(height / 2);
@@ -1030,13 +1102,12 @@
                     };
                 });
                 
-                // Position walls proportionally to new size
-                walls = walls.map(wall => {
-                    return {
-                        x: (wall.x / canvas.width) * width,
-                        y: (wall.y / canvas.height) * height
-                    };
-                });
+                // Position walls proportionally to new size and rebuild grid
+                walls = walls.map(wall => ({
+                    x: (wall.x / canvas.width) * width,
+                    y: (wall.y / canvas.height) * height
+                }));
+                rebuildWallGrid();
                 
                 // Redraw
                 draw();
