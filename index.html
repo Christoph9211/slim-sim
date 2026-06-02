@@ -8,7 +8,7 @@
     <title>Slime Mold Simulation</title>
     <!-- <script src="https://cdn.tailwindcss.com"></script> -->
     <script>
-        tailwind.config = {
+        if (window.tailwind) tailwind.config = {
             darkMode: 'class',
             theme: {
                 extend: {
@@ -34,6 +34,22 @@
     <style>
         canvas {
             touch-action: none;
+        }
+
+        #simulationFrame:fullscreen {
+            width: 100vw;
+            height: 100vh;
+            max-width: none;
+            border: 0;
+            border-radius: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f3f4f6;
+        }
+
+        .dark #simulationFrame:fullscreen {
+            background: #111827;
         }
         
         .dark .slider::-webkit-slider-thumb {
@@ -70,7 +86,7 @@
         
         <div class="flex flex-col md:flex-row gap-6">
             <div class="flex-grow flex flex-col items-center">
-                <div class="relative w-full max-w-3xl border-2 border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
+                <div id="simulationFrame" class="relative w-full max-w-3xl border-2 border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
                     <canvas id="simulationCanvas" class="w-full h-auto aspect-[4/3] bg-gray-100 dark:bg-gray-900"></canvas>
                     <div id="loading" class="absolute inset-0 flex items-center justify-center bg-white/80 dark:bg-gray-900/80">
                         <div class="flex flex-col items-center">
@@ -180,6 +196,7 @@
         let lastWallX = null;
         let lastWallY = null;
         let animationId = null;
+        let resizeFrameId = null;
         // Reusable image buffer for drawing trails
         let imageData = null;
         let imagePixels = null; // Uint8ClampedArray view
@@ -206,29 +223,107 @@
         function initCanvas() {
             // Set canvas size based on container
             const container = canvas.parentElement;
-            const containerWidth = container.clientWidth;
             const aspectRatio = 4/3;
-            const containerHeight = containerWidth / aspectRatio;
+            const isFullscreen = document.fullscreenElement === container;
+            const availableWidth = Math.max(1, Math.round(container.clientWidth));
+            const availableHeight = isFullscreen
+                ? Math.max(1, Math.round(container.clientHeight))
+                : Math.round(availableWidth / aspectRatio);
+            let containerWidth = availableWidth;
+            let containerHeight = Math.round(containerWidth / aspectRatio);
+            
+            if (isFullscreen && containerHeight > availableHeight) {
+                containerHeight = availableHeight;
+                containerWidth = Math.round(containerHeight * aspectRatio);
+            }
             
             // Set display size (css pixels)
             canvas.style.width = containerWidth + 'px';
             canvas.style.height = containerHeight + 'px';
             
-            // Set actual size in memory (scaled for high DPI)
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width = containerWidth * dpr;
-            canvas.height = containerHeight * dpr;
-            
-            // Scale context to match DPI
-            ctx.scale(dpr, dpr);
-            
             // Update simulation dimensions
             width = containerWidth;
             height = containerHeight;
             
+            // Use one logical coordinate space for rendering, simulation, and input.
+            canvas.width = width;
+            canvas.height = height;
+            
             // Set source position in the center
             settings.sourceX = Math.floor(width / 2);
             settings.sourceY = Math.floor(height / 2);
+        }
+
+        function getCanvasPoint(e) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: ((e.clientX - rect.left) / rect.width) * width,
+                y: ((e.clientY - rect.top) / rect.height) * height
+            };
+        }
+
+        function clamp(value, min, max) {
+            return Math.max(min, Math.min(max, value));
+        }
+
+        function resizeSimulation() {
+            const oldWidth = width || 1;
+            const oldHeight = height || 1;
+            const wasRunning = isRunning;
+            
+            if (wasRunning) {
+                isRunning = false;
+                if (animationId) {
+                    cancelAnimationFrame(animationId);
+                    animationId = null;
+                }
+            }
+            
+            initCanvas();
+            initTrailMap();
+            
+            const scaleX = width / oldWidth;
+            const scaleY = height / oldHeight;
+            
+            for (const resource of resources) {
+                resource.x = clamp(resource.x * scaleX, 0, width - 1);
+                resource.y = clamp(resource.y * scaleY, 0, height - 1);
+            }
+            
+            for (const wall of walls) {
+                wall.x = clamp(wall.x * scaleX, 0, width - 1);
+                wall.y = clamp(wall.y * scaleY, 0, height - 1);
+            }
+            rebuildWallGrid();
+            
+            for (const particle of particles) {
+                particle.x = clamp(particle.x * scaleX, 0, width - 1);
+                particle.y = clamp(particle.y * scaleY, 0, height - 1);
+                if (typeof particle.targetX === 'number') {
+                    particle.targetX = clamp(particle.targetX * scaleX, 0, width - 1);
+                }
+                if (typeof particle.targetY === 'number') {
+                    particle.targetY = clamp(particle.targetY * scaleY, 0, height - 1);
+                }
+            }
+            
+            draw();
+            
+            if (wasRunning) {
+                isRunning = true;
+                animate();
+            }
+        }
+
+        function scheduleResizeSimulation() {
+            if (resizeFrameId) {
+                cancelAnimationFrame(resizeFrameId);
+            }
+            
+            resizeFrameId = requestAnimationFrame(() => {
+                resizeFrameId = null;
+                resizeSimulation();
+            });
         }
         
         // Initialize the trail map array
@@ -765,12 +860,10 @@
         function handleCanvasClick(e) {
             if (!isAddingResources) return;
             
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX - rect.left) / (rect.width / canvas.width);
-            const y = (e.clientY - rect.top) / (rect.height / canvas.height);
+            const { x, y } = getCanvasPoint(e);
             
             resources.push({ x, y, amount: settings.resourceInitialAmount, maxAmount: settings.resourceInitialAmount });
-            draw(); // Redraw to show the new resource
+            if (!isRunning) draw(); // Redraw immediately only when the animation loop is paused
         }
         
         // Check if a point is inside a wall
@@ -825,9 +918,7 @@
             
             isDragging = true;
             
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX - rect.left) / (rect.width / canvas.width);
-            const y = (e.clientY - rect.top) / (rect.height / canvas.height);
+            const { x, y } = getCanvasPoint(e);
             
             lastWallX = x;
             lastWallY = y;
@@ -839,12 +930,12 @@
                 // Only add if not already a wall here
                 if (!isPointInWall(x, y)) {
                     addWall(x, y);
-                    draw();
+                    if (!isRunning) draw();
                 }
             } else if (isErasing) {
                 // Find and remove wall
                 if (removeWallAt(x, y)) {
-                    draw();
+                    if (!isRunning) draw();
                 }
             }
         }
@@ -853,9 +944,7 @@
         function handleMouseMove(e) {
             if (!isDragging) return;
             
-            const rect = canvas.getBoundingClientRect();
-            const x = (e.clientX - rect.left) / (rect.width / canvas.width);
-            const y = (e.clientY - rect.top) / (rect.height / canvas.height);
+            const { x, y } = getCanvasPoint(e);
             
             // Skip if too close to the last wall (to avoid excessive walls)
             if (lastWallX !== null && lastWallY !== null) {
@@ -876,12 +965,12 @@
                 // Only add if not already a wall here
                 if (!isPointInWall(x, y)) {
                     addWall(x, y);
-                    draw();
+                    if (!isRunning) draw();
                 }
             } else if (isErasing) {
                 // Find and remove wall
                 if (removeWallAt(x, y)) {
-                    draw();
+                    if (!isRunning) draw();
                 }
             }
         }
@@ -1074,57 +1163,17 @@
                 handleMouseUp();
             });
             
-            // Add event listener for window resize
-            window.addEventListener('resize', () => {
-                // Save current running state
-                const wasRunning = isRunning;
-                
-                // Pause if running
-                if (wasRunning) {
-                    isRunning = false;
-                    if (animationId) {
-                        cancelAnimationFrame(animationId);
-                        animationId = null;
-                    }
-                }
-                
-                // Resize canvas
-                initCanvas();
-                
-                // Create new trail map at new size
-                initTrailMap();
-                
-                // Position resources proportionally to new size
-                resources = resources.map(resource => {
-                    return {
-                        x: (resource.x / canvas.width) * width,
-                        y: (resource.y / canvas.height) * height
-                    };
-                });
-                
-                // Position walls proportionally to new size and rebuild grid
-                walls = walls.map(wall => ({
-                    x: (wall.x / canvas.width) * width,
-                    y: (wall.y / canvas.height) * height
-                }));
-                rebuildWallGrid();
-                
-                // Redraw
-                draw();
-                
-                // Resume if it was running
-                if (wasRunning) {
-                    isRunning = true;
-                    animate();
-                }
-            });
+            // Add event listeners for window/fullscreen resize
+            window.addEventListener('resize', scheduleResizeSimulation);
+            document.addEventListener('fullscreenchange', scheduleResizeSimulation);
             
             // Fullscreen toggle functionality
             const fullscreenBtn = document.getElementById('fullscreenBtn');
+            const fullscreenTarget = document.getElementById('simulationFrame');
 
             fullscreenBtn.addEventListener('click', () => {
                 if (!document.fullscreenElement) {
-                    canvas.requestFullscreen().catch(err => {
+                    fullscreenTarget.requestFullscreen().catch(err => {
                         alert(`Error attempting to enable fullscreen mode: ${err.message} (${err.name})`);
                     });
                 } else {
